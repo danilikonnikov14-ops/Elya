@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Эля самая лучшая</title>
+
+<style>
+  /* ============================================================
+     RESET & BASE
+     ============================================================ */
+  *,
+  *::before,
+  *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: #03040a;          /* near-black, deep navy base */
+  }
+
+  body {
+    font-family: "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
+    color: #dfe9ff;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    /* Prevent touch scrolling / zooming while interacting with the canvas */
+    touch-action: none;
+  }
+
+  /* ============================================================
+     CANVAS
+     ============================================================ */
+  #scene {
+    position: fixed;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+  }
+
+  /* ============================================================
+     RADIAL VIGNETTE + CINEMATIC DEPTH
+     ============================================================ */
+  .vignette {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background:
+      radial-gradient(ellipse 62% 52% at 50% 50%,
+        rgba(38, 110, 220, 0.10) 0%,
+        rgba(38, 110, 220, 0.00) 72%),
+      radial-gradient(ellipse 92% 82% at 50% 50%,
+        rgba(0, 0, 0, 0) 28%,
+        rgba(0, 0, 0, 0.52) 78%,
+        rgba(0, 0, 0, 0.93) 100%);
+  }
+
+  /* ============================================================
+     TYPOGRAPHY OVERLAY
+     ============================================================ */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(10px, 2.6vmin, 28px);
+    padding: 5vmin;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  .title {
+    font-size: clamp(0.95rem, 3.4vmin, 2.5rem);
+    font-weight: 200;
+    text-transform: uppercase;
+    letter-spacing: 0.52em;
+    text-indent: 0.52em;
+    color: #eef6ff;
+    white-space: nowrap;
+    animation: glowPulse 4.6s ease-in-out infinite;
+    will-change: opacity, text-shadow;
+  }
+
+  .subtitle {
+    font-size: clamp(0.5rem, 1.25vmin, 0.8rem);
+    font-weight: 300;
+    text-transform: uppercase;
+    letter-spacing: 0.48em;
+    text-indent: 0.48em;
+    color: rgba(168, 200, 255, 0.55);
+    white-space: nowrap;
+    animation: glowPulse 4.6s ease-in-out infinite;
+    animation-delay: -2.3s;
+    will-change: opacity, text-shadow;
+  }
+
+  @keyframes glowPulse {
+    0%, 100% {
+      opacity: 0.72;
+      text-shadow:
+        0 0 14px rgba(80, 180, 255, 0.32),
+        0 0 44px rgba(120, 80, 255, 0.20);
+    }
+    50% {
+      opacity: 1;
+      text-shadow:
+        0 0 22px rgba(120, 210, 255, 0.66),
+        0 0 72px rgba(140, 90, 255, 0.40);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .title, .subtitle { animation: none; opacity: 0.9; }
+  }
+</style>
+</head>
+
+<body>
+  <canvas id="scene" aria-hidden="true"></canvas>
+  <div class="vignette" aria-hidden="true"></div>
+
+  <main class="overlay">
+    <h1 class="title">ЭЛЯ</h1>
+    <p class="subtitle">Я тебя люблю</p>
+  </main>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+     CONFIGURATION
+     ============================================================ */
+  const CONFIG = {
+    contourSamples : 720,
+    boltCount      : 42,
+    maxSegments    : 28,
+    sparkCount     : 80,
+    maxDPR         : 2,
+    trailFade      : 0.26,
+    bgColor        : '#03040a',
+
+    // Magnetic interaction
+    magnetRadius   : 240,    // px — how far the cursor "pulls"
+    magnetStrength : 0.9,    // 0..1 — max amount of pull at the cursor
+    magnetEase     : 0.14    // 0..1 — how quickly the effect engages
+  };
+
+  const FADE_STYLE = 'rgba(3, 4, 10, ' + CONFIG.trailFade + ')';
+
+  /* ============================================================
+     CANVAS SETUP
+     ============================================================ */
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  let W = 0, H = 0, DPR = 1;
+
+  /* ============================================================
+     STATE
+     ============================================================ */
+  let heart = [];
+  let heartLength = 0;
+  let bolts = [];
+  let sparks = [];
+  let lastTime = 0;
+
+  // Cursor / touch pointer — animated so the magnet never snaps
+  const pointer = {
+    x: 0, y: 0,
+    tx: 0, ty: 0,          // target
+    active: false,
+    strength: 0            // eased 0..1
+  };
+
+  const scratch = { x: 0, y: 0, nx: 0, ny: 0 };
+  const boltPts = new Float32Array((CONFIG.maxSegments + 1) * 2);
+
+  /* ============================================================
+     GEOMETRY — PARAMETRIC HEART CURVE
+     ============================================================ */
+  function heartPoint(t) {
+    const s = Math.sin(t);
+    return {
+      x: 16 * s * s * s,
+      y: -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t))
+    };
+  }
+
+  function buildHeart() {
+    const RAW = 1600;
+    const raw = new Array(RAW);
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+
+    for (let i = 0; i < RAW; i++) {
+      const p = heartPoint((i / RAW) * Math.PI * 2);
+      raw[i] = p;
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    const boxW = maxX - minX;
+    const boxH = maxY - minY;
+    const availW = Math.min(W, H) * 0.82 * (W > H ? 1.28 : 1);
+    const availH = H * 0.74;
+    const scale = Math.min(availW / boxW, availH / boxH);
+
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+    const midX = (minX + maxX) * 0.5;
+    const midY = (minY + maxY) * 0.5;
+
+    const pts = new Array(RAW);
+    for (let i = 0; i < RAW; i++) {
+      pts[i] = {
+        x: cx + (raw[i].x - midX) * scale,
+        y: cy + (raw[i].y - midY) * scale
+      };
+    }
+
+    const cum = new Float64Array(RAW + 1);
+    for (let i = 1; i <= RAW; i++) {
+      const a = pts[i - 1];
+      const b = pts[i % RAW];
+      cum[i] = cum[i - 1] + Math.hypot(b.x - a.x, b.y - a.y);
+    }
+    heartLength = cum[RAW];
+
+    const M = CONFIG.contourSamples;
+    const out = new Array(M);
+    let seg = 0;
+
+    for (let k = 0; k < M; k++) {
+      const target = (k / M) * heartLength;
+      while (seg < RAW - 1 && cum[seg + 1] < target) seg++;
+
+      const t0 = cum[seg];
+      const t1 = cum[seg + 1];
+      const f = t1 > t0 ? (target - t0) / (t1 - t0) : 0;
+      const a = pts[seg];
+      const b = pts[(seg + 1) % RAW];
+
+      out[k] = {
+        x: a.x + (b.x - a.x) * f,
+        y: a.y + (b.y - a.y) * f,
+        nx: 0,
+        ny: 0
+      };
+    }
+
+    for (let i = 0; i < M; i++) {
+      const prev = out[(i - 1 + M) % M];
+      const next = out[(i + 1) % M];
+
+      let tx = next.x - prev.x;
+      let ty = next.y - prev.y;
+      const len = Math.hypot(tx, ty) || 1;
+      tx /= len;
+      ty /= len;
+
+      let nx = -ty;
+      let ny = tx;
+
+      if ((out[i].x - cx) * nx + (out[i].y - cy) * ny < 0) {
+        nx = -nx;
+        ny = -ny;
+      }
+
+      out[i].nx = nx;
+      out[i].ny = ny;
+    }
+
+    heart = out;
+  }
+
+  function sampleHeart(idx) {
+    const M = heart.length;
+    const base = Math.floor(idx);
+    const f = idx - base;
+
+    let i = base % M;
+    if (i < 0) i += M;
+    const j = i + 1 === M ? 0 : i + 1;
+
+    const a = heart[i];
+    const b = heart[j];
+
+    scratch.x  = a.x  + (b.x  - a.x)  * f;
+    scratch.y  = a.y  + (b.y  - a.y)  * f;
+    scratch.nx = a.nx + (b.nx - a.nx) * f;
+    scratch.ny = a.ny + (b.ny - a.ny) * f;
+  }
+
+  /* ============================================================
+     BOLTS
+     ============================================================ */
+  function spawnBolt(b) {
+    b.pos       = Math.random() * heart.length;
+    b.dir       = Math.random() < 0.5 ? 1 : -1;
+    b.speed     = 30 + Math.random() * 130;
+    b.span      = 25 + Math.random() * 110;
+    b.amp       = 3 + Math.random() * 20;
+    b.thickness = 0.6 + Math.random() * 1.6;
+    b.hue       = 182 + Math.random() * 95;
+    b.age       = 0;
+    b.ttl       = 0.55 + Math.random() * 1.5;
+    b.segCount  = Math.min(CONFIG.maxSegments, Math.round(6 + b.span * 0.16));
+
+    if (!b.jitter) b.jitter = new Float32Array(CONFIG.maxSegments + 1);
+    for (let i = 0; i <= b.segCount; i++) {
+      b.jitter[i] = Math.random() * 2 - 1;
+    }
+
+    // Per-bolt magnet weakness so they don't all snap identically
+    b.magnetBias = 0.55 + Math.random() * 0.9;
+
+    return b;
+  }
+
+  function initBolts() {
+    bolts = new Array(CONFIG.boltCount);
+    for (let i = 0; i < CONFIG.boltCount; i++) {
+      const b = spawnBolt({});
+      b.age = Math.random() * b.ttl * 0.9;
+      bolts[i] = b;
+    }
+  }
+
+  function updateAndDrawBolt(b, dt) {
+    b.age += dt;
+
+    if (b.age >= b.ttl) {
+      spawnBolt(b);
+      return;
+    }
+
+    const M = heart.length;
+    b.pos += b.dir * b.speed * dt;
+    b.pos = ((b.pos % M) + M) % M;
+
+    const j = b.jitter;
+    const n = b.segCount;
+    for (let i = 0; i <= n; i++) {
+      let v = j[i] + (Math.random() - 0.5) * 0.55;
+      if (v > 1) v = 1 - Math.random() * 0.35;
+      else if (v < -1) v = -1 + Math.random() * 0.35;
+      j[i] = v;
+    }
+
+    drawBolt(b);
+  }
+
+  /**
+   * Draw one bolt. The magnet effect is applied per-vertex:
+   * vertices near the pointer are pulled toward it, weighted by
+   * distance falloff, so the bolt bends like a magnetic field line.
+   */
+  function drawBolt(b) {
+    const lifeEnv = Math.sin(Math.PI * Math.min(1, b.age / b.ttl));
+    if (lifeEnv <= 0.02) return;
+
+    const segs = b.segCount;
+    const stepIdx = (b.span * b.dir) / segs;
+
+    const magnetOn = pointer.strength > 0.001;
+    const R2 = CONFIG.magnetRadius * CONFIG.magnetRadius;
+    const pullMax = CONFIG.magnetStrength * pointer.strength * b.magnetBias;
+
+    let n = 0;
+    for (let i = 0; i <= segs; i++) {
+      const u = i / segs;
+      sampleHeart(b.pos + stepIdx * i);
+
+      const taper = Math.sin(Math.PI * u);
+      const off = b.jitter[i] * b.amp * taper;
+
+      let px = scratch.x + scratch.nx * off;
+      let py = scratch.y + scratch.ny * off;
+
+      // ---- MAGNETIC ATTRACTION ----
+      if (magnetOn) {
+        const dx = pointer.x - px;
+        const dy = pointer.y - py;
+        const d2 = dx * dx + dy * dy;
+
+        if (d2 < R2) {
+          // Smooth 1 -> 0 falloff from centre of influence
+          const t = 1 - d2 / R2;
+          const falloff = t * t * (3 - 2 * t);   // smoothstep
+          const k = falloff * pullMax;
+          px += dx * k;
+          py += dy * k;
+        }
+      }
+
+      boltPts[n++] = px;
+      boltPts[n++] = py;
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(boltPts[0], boltPts[1]);
+    for (let i = 1; i <= segs; i++) {
+      ctx.lineTo(boltPts[i * 2], boltPts[i * 2 + 1]);
+    }
+
+    const a = Math.pow(lifeEnv, 0.8);
+    const w = b.thickness;
+
+    // Extra flare when a bolt is being pulled
+    const heat = magnetOn ? 1 + pointer.strength * 0.25 : 1;
+
+    ctx.lineWidth = Math.max(2, w * 6 * heat);
+    ctx.strokeStyle = 'hsla(' + b.hue + ', 100%, 60%, ' + (a * 0.13) + ')';
+    ctx.stroke();
+
+    ctx.lineWidth = Math.max(1, w * 2.1 * heat);
+    ctx.strokeStyle = 'hsla(' + b.hue + ', 100%, 70%, ' + (a * 0.45) + ')';
+    ctx.stroke();
+
+    ctx.lineWidth = Math.max(0.5, w * 0.85);
+    ctx.strokeStyle = 'rgba(238, 249, 255, ' + (a * 0.92) + ')';
+    ctx.stroke();
+  }
+
+  /* ============================================================
+     SPARKS
+     ============================================================ */
+  function spawnSpark() {
+    const i = (Math.random() * heart.length) | 0;
+    const p = heart[i] || { x: W / 2, y: H / 2, nx: 0, ny: -1 };
+    const speed = 10 + Math.random() * 70;
+
+    return {
+      x: p.x,
+      y: p.y,
+      vx: p.nx * speed + (Math.random() - 0.5) * 22,
+      vy: p.ny * speed + (Math.random() - 0.5) * 22,
+      life: 0,
+      ttl: 0.5 + Math.random() * 1.3,
+      size: 0.6 + Math.random() * 1.6,
+      hue: 182 + Math.random() * 95
+    };
+  }
+
+  function initSparks() {
+    sparks = new Array(CONFIG.sparkCount);
+    for (let i = 0; i < CONFIG.sparkCount; i++) sparks[i] = spawnSpark();
+  }
+
+  function updateAndDrawSparks(dt) {
+    const magnetOn = pointer.strength > 0.001;
+    const R2 = CONFIG.magnetRadius * CONFIG.magnetRadius;
+    const pull = 2.2 * pointer.strength;
+
+    for (let i = 0; i < sparks.length; i++) {
+      const s = sparks[i];
+      s.life += dt;
+
+      if (s.life >= s.ttl) {
+        sparks[i] = spawnSpark();
+        continue;
+      }
+
+      // Sparks get gently drawn toward the cursor too
+      if (magnetOn) {
+        const dx = pointer.x - s.x;
+        const dy = pointer.y - s.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < R2 && d2 > 1) {
+          const t = 1 - d2 / R2;
+          const k = t * t * pull;
+          s.vx += dx * k * dt;
+          s.vy += dy * k * dt;
+        }
+      }
+
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vx *= 0.985;
+      s.vy *= 0.985;
+
+      const k = 1 - s.life / s.ttl;
+
+      ctx.beginPath();
+      ctx.fillStyle = 'hsla(' + s.hue + ', 100%, 76%, ' + (0.5 * k) + ')';
+      ctx.arc(s.x, s.y, s.size, 0, 6.283185307179586);
+      ctx.fill();
+    }
+  }
+
+  /* ============================================================
+     POINTER / TOUCH INPUT
+     ============================================================ */
+  function setPointer(x, y, active) {
+    pointer.tx = x;
+    pointer.ty = y;
+    pointer.active = active;
+
+    // First contact: jump straight to the position (no long sweep)
+    if (active && pointer.strength < 0.02) {
+      pointer.x = x;
+      pointer.y = y;
+    }
+  }
+
+  // Mouse
+  window.addEventListener('mousemove', function (e) {
+    setPointer(e.clientX, e.clientY, true);
+  }, { passive: true });
+
+  window.addEventListener('mouseleave', function () {
+    pointer.active = false;
+  }, { passive: true });
+
+  // Touch — tracks the primary finger
+  window.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 0) return;
+    const t = e.touches[0];
+    setPointer(t.clientX, t.clientY, true);
+  }, { passive: true });
+
+  window.addEventListener('touchmove', function (e) {
+    if (e.touches.length === 0) return;
+    const t = e.touches[0];
+    setPointer(t.clientX, t.clientY, true);
+  }, { passive: true });
+
+  window.addEventListener('touchend', function (e) {
+    if (e.touches.length === 0) pointer.active = false;
+  }, { passive: true });
+
+  window.addEventListener('touchcancel', function () {
+    pointer.active = false;
+  }, { passive: true });
+
+  /* ============================================================
+     RESIZE
+     ============================================================ */
+  let resizeQueued = false;
+
+  function requestResize() {
+    if (resizeQueued) return;
+    resizeQueued = true;
+    requestAnimationFrame(function () {
+      resizeQueued = false;
+      resize();
+    });
+  }
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    DPR = Math.min(window.devicePixelRatio || 1, CONFIG.maxDPR);
+
+    canvas.width = Math.max(1, Math.round(W * DPR));
+    canvas.height = Math.max(1, Math.round(H * DPR));
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = CONFIG.bgColor;
+    ctx.fillRect(0, 0, W, H);
+
+    buildHeart();
+    initBolts();
+    initSparks();
+
+    lastTime = 0;
+  }
+
+  /* ============================================================
+     MAIN LOOP
+     ============================================================ */
+  function animate(now) {
+    requestAnimationFrame(animate);
+
+    if (!lastTime) lastTime = now;
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+    if (dt > 0.05) dt = 0.05;
+
+    /* --- Ease the pointer so the magnet feels alive, not robotic --- */
+    if (pointer.active) {
+      pointer.x += (pointer.tx - pointer.x) * CONFIG.magnetEase;
+      pointer.y += (pointer.ty - pointer.y) * CONFIG.magnetEase;
+      pointer.strength += (1 - pointer.strength) * CONFIG.magnetEase;
+    } else {
+      pointer.strength *= 0.94;
+      if (pointer.strength < 0.001) pointer.strength = 0;
+    }
+
+    /* 1. Fade the previous frame -> soft electric motion trails */
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = FADE_STYLE;
+    ctx.fillRect(0, 0, W, H);
+
+    /* 2. Additive light pass */
+    ctx.globalCompositeOperation = 'lighter';
+
+    updateAndDrawSparks(dt);
+
+    for (let i = 0; i < bolts.length; i++) {
+      updateAndDrawBolt(bolts[i], dt);
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /* ============================================================
+     BOOT
+     ============================================================ */
+  window.addEventListener('resize', requestResize, { passive: true });
+  window.addEventListener('orientationchange', requestResize, { passive: true });
+
+  resize();
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>
